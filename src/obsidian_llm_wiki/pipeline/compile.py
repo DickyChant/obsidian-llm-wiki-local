@@ -68,10 +68,16 @@ _WRITE_SYSTEM = (
 
 
 def _load_vault_schema(config: Config) -> str:
-    """Read vault-schema.md if it exists (injected into write prompts for context)."""
+    """Read vault-schema.md if it exists (injected into write prompts for context).
+
+    Truncated at 4000 chars to leave headroom for richer per-vault style rules
+    (required sections, citation conventions, etc.) without crowding the
+    source-material window. Earlier versions capped at 1500 — bumped after
+    HGCAL needed more room for hardware-section conventions.
+    """
     if config.schema_path.exists():
         try:
-            return config.schema_path.read_text(encoding="utf-8")[:1500]
+            return config.schema_path.read_text(encoding="utf-8")[:4000]
         except Exception:
             pass
     return ""
@@ -302,6 +308,9 @@ def _write_concept_prompt(
     vault_schema: str = "",
     rejection_history: list[str] | None = None,
     language: str | None = None,
+    taxonomy_parent: str | None = None,
+    taxonomy_is_instance: bool = False,
+    taxonomy_is_declared_type: bool = False,
 ) -> str:
     titles_str = ", ".join(existing_titles[:50]) if existing_titles else "none yet"
     lang_instruction = (
@@ -312,6 +321,24 @@ def _write_concept_prompt(
     prompt = f'Write the wiki article: "{concept}"\n'
     if vault_schema:
         prompt += f"\nVAULT CONVENTIONS:\n{vault_schema}\n"
+
+    # Taxonomy-aware guidance (set when vault-concepts.md is present).
+    # Instance branch: short article that links up to its type.
+    # Type branch: definitional overview that doesn't enumerate instances.
+    if taxonomy_parent and taxonomy_is_instance:
+        prompt += (
+            f"\nTAXONOMY: This concept is an instance of [[{taxonomy_parent}]]. "
+            f"Open with one sentence that wikilinks the parent ([[{taxonomy_parent}]]) "
+            f"and states what makes this instance specific. Keep the article under "
+            f"300 words — don't redefine [[{taxonomy_parent}]], link to it.\n"
+        )
+    elif taxonomy_is_declared_type:
+        prompt += (
+            f"\nTAXONOMY: This is a top-level type/category. Write a definitional "
+            f"overview (under 800 words). Reference instances via [[wikilinks]] "
+            f"but do NOT enumerate every one — instances have their own short articles.\n"
+        )
+
     prompt += (
         f"\n{lang_instruction}"
         f"IMPORTANT: Keep the content field under 800 words. Be concise.\n"
@@ -368,6 +395,10 @@ def compile_concepts(
     log.info("Compiling %d concept(s)", len(concept_names))
     existing_titles = [t for t, _ in list_wiki_articles(config.wiki_dir)]
     vault_schema = _load_vault_schema(config)
+    # Load the seeded taxonomy once per run; classify each concept lazily below.
+    from ..concepts import classify_concept, load_concept_taxonomy
+
+    taxonomy = load_concept_taxonomy(config.vault)
     total = len(concept_names)
     # Build alias resolution map once per compile run
     alias_map = db.list_alias_map()
@@ -482,6 +513,7 @@ def compile_concepts(
         )
 
         lang = _resolve_language([str(p) for p in resolved_paths], db, config)
+        tax_parent, tax_is_instance, tax_is_declared_type = classify_concept(name, taxonomy)
         write_prompt = _write_concept_prompt(
             name,
             sources_text,
@@ -490,6 +522,9 @@ def compile_concepts(
             vault_schema,
             rejection_history,
             language=lang,
+            taxonomy_parent=tax_parent,
+            taxonomy_is_instance=tax_is_instance,
+            taxonomy_is_declared_type=tax_is_declared_type,
         )
 
         try:

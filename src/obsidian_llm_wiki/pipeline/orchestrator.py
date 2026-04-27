@@ -71,7 +71,7 @@ class PipelineOrchestrator:
         paths: list[str] | None = None,
         auto_approve: bool = False,
         fix: bool = False,
-        max_rounds: int = 2,
+        max_rounds: int | None = None,
         dry_run: bool = False,
     ) -> PipelineReport:
         """
@@ -80,7 +80,9 @@ class PipelineOrchestrator:
         paths: specific raw note paths to ingest (None = ingest all changed notes)
         auto_approve: publish drafts immediately without manual review
         fix: create stubs for broken wikilinks after lint
-        max_rounds: maximum compile rounds (round 2 retries transient failures only)
+        max_rounds: maximum compile rounds; round 1 + (N-1) retries on TRANSIENT
+            failures only. Defaults to config.pipeline.max_compile_rounds when
+            None (CLI flag overrides config).
         dry_run: report what would happen; no LLM calls, no file writes
         """
         from ..git_ops import git_commit
@@ -94,6 +96,10 @@ class PipelineOrchestrator:
         client = self.client
         db = self.db
         report = PipelineReport()
+
+        # CLI flag wins over config; config wins over the legacy default of 2.
+        if max_rounds is None:
+            max_rounds = getattr(config.pipeline, "max_compile_rounds", 2)
 
         # ── Round 1: Ingest ────────────────────────────────────────────────────
         t0 = time.monotonic()
@@ -166,23 +172,33 @@ class PipelineOrchestrator:
                 stubs = create_stubs(config, db, broken_link_issues=broken_links, max_stubs=3)
                 report.stubs_created = len(stubs)
 
-        # ── Round 2: Retry transient failures ─────────────────────────────────
-        transient = [f for f in round1_failed if f.reason == FailureReason.TRANSIENT]
-        if transient and report.rounds < max_rounds:
-            log.info("── Compile round 2 (%d retries) ────────────────────────────", len(transient))
+        # ── Rounds 2..N: Retry transient failures ─────────────────────────────
+        # Each subsequent round retries the concepts that failed transiently in
+        # the previous round. Per-round bookkeeping mirrors the round-1 block:
+        # add new drafts, update concept timings, swap the prior round's
+        # transient failures out of report.failed for the new outcome.
+        while True:
+            transient = [f for f in report.failed if f.reason == FailureReason.TRANSIENT]
+            if not transient or report.rounds >= max_rounds:
+                break
+            next_round = report.rounds + 1
+            log.info(
+                "── Compile round %d (%d retries) ────────────────────────────",
+                next_round, len(transient),
+            )
             transient_concepts = [f.concept for f in transient]
-            t2 = time.monotonic()
-            r2_drafts, r2_failed, r2_timings = _run_compile(
+            tN = time.monotonic()
+            rN_drafts, rN_failed, rN_timings = _run_compile(
                 config, client, db, concepts=transient_concepts, dry_run=dry_run
             )
-            report.timings["compile_r2"] = time.monotonic() - t2
-            report.compiled += len(r2_drafts)
-            draft_paths = draft_paths + r2_drafts
-            report.concept_timings.update(r2_timings)
-            # Replace transient failures with round-2 results
+            report.timings[f"compile_r{next_round}"] = time.monotonic() - tN
+            report.compiled += len(rN_drafts)
+            draft_paths = draft_paths + rN_drafts
+            report.concept_timings.update(rN_timings)
+            # Drop the prior round's transient set; carry over its outcome.
             report.failed = [f for f in report.failed if f.reason != FailureReason.TRANSIENT]
-            report.failed.extend(r2_failed)
-            report.rounds = 2
+            report.failed.extend(rN_failed)
+            report.rounds = next_round
 
         # ── Approve ────────────────────────────────────────────────────────────
         if auto_approve and draft_paths and not dry_run:

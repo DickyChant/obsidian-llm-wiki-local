@@ -412,9 +412,16 @@ def ingest_note(
             metadata={"source": rel_path, "type": "raw"},
         )
 
-    # LLM analysis — use existing concept names so model can reuse canonical names
+    # LLM analysis — use existing concept names so model can reuse canonical names.
+    # Union with any pre-seeded canonical names from vault-concepts.md so the model
+    # sees them even on the very first ingest of a fresh vault.
     if existing_topics is None:
-        existing_topics = db.list_all_concept_names()
+        from ..concepts import load_concept_taxonomy
+
+        existing_topics = sorted(
+            set(db.list_all_concept_names())
+            | set(load_concept_taxonomy(config.vault).keys())
+        )
     try:
         result: AnalysisResult = _analyze_body(
             body=body,
@@ -485,8 +492,15 @@ def ingest_all(
         for p in config.raw_dir.rglob("*.md")
         if "processed" not in p.parts and not p.name.startswith(".")
     ]
-    # Snapshot concept names once before loop (for consistent prompt context)
-    existing_topics = db.list_all_concept_names()
+    # Snapshot concept names once before loop (for consistent prompt context).
+    # Union with the seeded taxonomy so first-time ingests of a fresh vault
+    # also benefit from canonical-name guidance.
+    from ..concepts import load_concept_taxonomy
+
+    existing_topics = sorted(
+        set(db.list_all_concept_names())
+        | set(load_concept_taxonomy(config.vault).keys())
+    )
     results = []
     for path in sorted(raw_files):
         result = ingest_note(

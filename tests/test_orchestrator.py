@@ -218,6 +218,64 @@ def test_orchestrator_llm_output_not_retried(config, db):
     assert report.failed[0].concept == "BadJSON"
 
 
+def test_orchestrator_round_3_retries_residual_transient(config, db):
+    """With max_rounds=3, a still-transient round-2 failure gets a round-3 try."""
+    flaky = FailureRecord(concept="Flaky", reason=FailureReason.TRANSIENT)
+
+    round1 = ([], [flaky], {})
+    round2 = ([], [flaky], {})  # still transient
+    round3 = ([], [], {})  # finally resolved
+
+    with patch("obsidian_llm_wiki.pipeline.orchestrator._run_compile") as mock_compile:
+        mock_compile.side_effect = [round1, round2, round3]
+        orch = PipelineOrchestrator(config, make_mock_client(), db)
+        report = orch.run(paths=[], max_rounds=3)
+
+    assert mock_compile.call_count == 3
+    assert report.rounds == 3
+    # Flaky was retried away in round 3 — should not appear in final failed list.
+    assert not any(f.concept == "Flaky" for f in report.failed)
+    # Per-round timing key was emitted for each retry round.
+    assert "compile_r2" in report.timings
+    assert "compile_r3" in report.timings
+
+
+def test_orchestrator_max_rounds_caps_retries(config, db):
+    """With max_rounds=2, a still-transient round-2 failure does NOT trigger round 3."""
+    flaky = FailureRecord(concept="Flaky", reason=FailureReason.TRANSIENT)
+
+    round1 = ([], [flaky], {})
+    round2 = ([], [flaky], {})  # would qualify for round 3, but max_rounds caps us
+
+    with patch("obsidian_llm_wiki.pipeline.orchestrator._run_compile") as mock_compile:
+        mock_compile.side_effect = [round1, round2]
+        orch = PipelineOrchestrator(config, make_mock_client(), db)
+        report = orch.run(paths=[], max_rounds=2)
+
+    assert mock_compile.call_count == 2
+    assert report.rounds == 2
+    # Flaky still failing after max rounds — must remain in the report.
+    assert any(f.concept == "Flaky" for f in report.failed)
+
+
+def test_orchestrator_max_rounds_default_from_config(config, db):
+    """max_rounds=None falls back to config.pipeline.max_compile_rounds."""
+    config.pipeline.max_compile_rounds = 3
+    flaky = FailureRecord(concept="Flaky", reason=FailureReason.TRANSIENT)
+
+    round1 = ([], [flaky], {})
+    round2 = ([], [flaky], {})
+    round3 = ([], [], {})
+
+    with patch("obsidian_llm_wiki.pipeline.orchestrator._run_compile") as mock_compile:
+        mock_compile.side_effect = [round1, round2, round3]
+        orch = PipelineOrchestrator(config, make_mock_client(), db)
+        report = orch.run(paths=[])  # no max_rounds passed
+
+    assert mock_compile.call_count == 3
+    assert report.rounds == 3
+
+
 def test_orchestrator_selective_recompile_with_absolute_paths(config, db):
     """Absolute paths from watchdog must be normalized to vault-relative before DB lookup."""
     import json

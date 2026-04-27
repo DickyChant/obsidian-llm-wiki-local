@@ -368,7 +368,17 @@ def _write_vault_schema(vault: Path) -> None:
             "Every wiki note has YAML frontmatter with: title, tags, sources, "
             "confidence, status, created, updated.\n\n"
             "## Links\n"
-            "Use `[[Article Title]]` wikilinks between notes.\n"
+            "Use `[[Article Title]]` wikilinks between notes.\n\n"
+            "## Suggested article structure (compile prompt picks these up)\n"
+            "- `## Overview` — 1-2 sentence definition of the concept.\n"
+            "- `## Description` — detail; link related concepts via [[wikilinks]].\n"
+            "- `## Sources` — `[[sources/<filename>]]` for each source note.\n\n"
+            "## Pre-defined concepts\n"
+            "If `vault-concepts.md` exists alongside this file, olw treats top-level "
+            "bullets as canonical types and nested bullets as instances. Compile "
+            "writes a 'definitional overview' for types and a short instance "
+            "article (`<300 words`) for things matching `<Type> <suffix>` "
+            "(e.g. `Run 115808` is auto-classified as an instance of `Run`).\n"
         )
 
 
@@ -1412,7 +1422,12 @@ def watch(vault_str, auto_approve):
 @click.option("--vault", "vault_str", envvar="OLW_VAULT", default=None)
 @click.option("--auto-approve", is_flag=True, help="Publish drafts immediately")
 @click.option("--fix", is_flag=True, help="Create stubs for broken wikilinks")
-@click.option("--max-rounds", default=2, show_default=True, help="Max compile rounds")
+@click.option(
+    "--max-rounds",
+    type=int,
+    default=None,
+    help="Max compile rounds (overrides [pipeline] max_compile_rounds in wiki.toml; default 4)",
+)
 @click.option("--dry-run", is_flag=True, help="Report what would happen, make no changes")
 @_model_override_options
 def run(

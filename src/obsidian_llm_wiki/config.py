@@ -67,6 +67,7 @@ def default_wiki_toml(
         f"auto_maintain = false\n"
         f"watch_debounce = 3.0\n"
         f"max_concepts_per_source = 8\n"
+        f"max_compile_rounds = 4   # round 1 + (N-1) retries on TRANSIENT (timeout/5xx/429) failures\n"
         f"ingest_parallel = false   # true = parallel chunks\n"
         f'# language = "en"  # ISO 639-1 output language; autodetects from notes if unset\n'
     )
@@ -101,6 +102,7 @@ class PipelineConfig(BaseModel):
     auto_commit: bool = True
     watch_debounce: float = 3.0
     max_concepts_per_source: int = 8
+    max_compile_rounds: int = 4  # round 1 + (N-1) retries on TRANSIENT failures only
     auto_maintain: bool = False
     ingest_parallel: bool = False  # parallel chunk analysis (needs OLLAMA_NUM_PARALLEL≥4)
     language: str | None = None  # ISO 639-1 output language; autodetects from notes if unset
