@@ -311,6 +311,7 @@ def _write_concept_prompt(
     taxonomy_parent: str | None = None,
     taxonomy_is_instance: bool = False,
     taxonomy_is_declared_type: bool = False,
+    required_aliases: list[str] | None = None,
 ) -> str:
     titles_str = ", ".join(existing_titles[:50]) if existing_titles else "none yet"
     lang_instruction = (
@@ -337,6 +338,16 @@ def _write_concept_prompt(
             f"\nTAXONOMY: This is a top-level type/category. Write a definitional "
             f"overview (under 800 words). Reference instances via [[wikilinks]] "
             f"but do NOT enumerate every one — instances have their own short articles.\n"
+        )
+    if required_aliases:
+        # Surface forms declared in vault-concepts.md must end up in the article's
+        # frontmatter aliases — they're how the wiki reaches the canonical from
+        # alternate names without ever generating a separate article.
+        alias_csv = ", ".join(f'"{a}"' for a in required_aliases)
+        prompt += (
+            f"\nALIASES: This concept's frontmatter `aliases:` list MUST include "
+            f"exactly these surface forms (in addition to whatever else you choose): "
+            f"{alias_csv}.\n"
         )
 
     prompt += (
@@ -395,10 +406,33 @@ def compile_concepts(
     log.info("Compiling %d concept(s)", len(concept_names))
     existing_titles = [t for t, _ in list_wiki_articles(config.wiki_dir)]
     vault_schema = _load_vault_schema(config)
-    # Load the seeded taxonomy once per run; classify each concept lazily below.
-    from ..concepts import classify_concept, load_concept_taxonomy
+    # Load the seeded taxonomy + synonym map once per run.
+    # taxonomy: concept → parent (used for instance/type prompt branching)
+    # synonyms: canonical → [alias, alias, ...] (folded into the canonical's
+    #           frontmatter aliases; the synonyms themselves are skipped)
+    from ..concepts import classify_concept, load_concept_synonyms, load_concept_taxonomy
 
     taxonomy = load_concept_taxonomy(config.vault)
+    synonym_map = load_concept_synonyms(config.vault)
+    # Reverse lookup: synonym → canonical, for fast skip decisions.
+    synonym_to_canonical: dict[str, str] = {
+        syn: canonical
+        for canonical, syns in synonym_map.items()
+        for syn in syns
+    }
+    if synonym_to_canonical:
+        # Filter out concepts that are declared synonyms — they don't get
+        # standalone articles; their surface form lives in the canonical's
+        # aliases. This is what prevents the cross-page redirect-loop bug
+        # (HGCAL ↔ High-Granularity-Calorimeter) we hit on 2026-04-27.
+        before = len(concept_names)
+        concept_names = [c for c in concept_names if c not in synonym_to_canonical]
+        skipped = before - len(concept_names)
+        if skipped:
+            log.info(
+                "Skipping %d concept(s) declared as synonyms in vault-concepts.md",
+                skipped,
+            )
     total = len(concept_names)
     # Build alias resolution map once per compile run
     alias_map = db.list_alias_map()
@@ -525,6 +559,7 @@ def compile_concepts(
             taxonomy_parent=tax_parent,
             taxonomy_is_instance=tax_is_instance,
             taxonomy_is_declared_type=tax_is_declared_type,
+            required_aliases=synonym_map.get(name),
         )
 
         try:

@@ -413,15 +413,17 @@ def ingest_note(
         )
 
     # LLM analysis — use existing concept names so model can reuse canonical names.
-    # Union with any pre-seeded canonical names from vault-concepts.md so the model
-    # sees them even on the very first ingest of a fresh vault.
+    # Union with pre-seeded canonical names from vault-concepts.md so the model
+    # sees them even on the very first ingest of a fresh vault. Synonym surface
+    # forms also go in so the analyzer recognizes them in the body — but they
+    # remain mapped to the canonical (no separate concept extracted).
     if existing_topics is None:
-        from ..concepts import load_concept_taxonomy
+        from ..concepts import load_concept_synonyms, load_concept_taxonomy
 
-        existing_topics = sorted(
-            set(db.list_all_concept_names())
-            | set(load_concept_taxonomy(config.vault).keys())
-        )
+        seeded = set(load_concept_taxonomy(config.vault).keys())
+        for syns in load_concept_synonyms(config.vault).values():
+            seeded.update(syns)
+        existing_topics = sorted(set(db.list_all_concept_names()) | seeded)
     try:
         result: AnalysisResult = _analyze_body(
             body=body,
@@ -493,14 +495,16 @@ def ingest_all(
         if "processed" not in p.parts and not p.name.startswith(".")
     ]
     # Snapshot concept names once before loop (for consistent prompt context).
-    # Union with the seeded taxonomy so first-time ingests of a fresh vault
-    # also benefit from canonical-name guidance.
-    from ..concepts import load_concept_taxonomy
+    # Union with the seeded taxonomy + its declared synonym surface forms so
+    # first-time ingests of a fresh vault benefit from canonical-name guidance
+    # AND recognize abbreviations the model would otherwise extract as new
+    # concepts.
+    from ..concepts import load_concept_synonyms, load_concept_taxonomy
 
-    existing_topics = sorted(
-        set(db.list_all_concept_names())
-        | set(load_concept_taxonomy(config.vault).keys())
-    )
+    seeded = set(load_concept_taxonomy(config.vault).keys())
+    for syns in load_concept_synonyms(config.vault).values():
+        seeded.update(syns)
+    existing_topics = sorted(set(db.list_all_concept_names()) | seeded)
     results = []
     for path in sorted(raw_files):
         result = ingest_note(

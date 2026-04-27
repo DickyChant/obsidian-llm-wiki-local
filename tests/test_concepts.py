@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from obsidian_llm_wiki.concepts import classify_concept, load_concept_taxonomy
+from obsidian_llm_wiki.concepts import (
+    classify_concept,
+    is_synonym,
+    load_concept_synonyms,
+    load_concept_taxonomy,
+)
 
 
 def _write(vault: Path, body: str) -> None:
@@ -124,3 +129,92 @@ def test_classify_concept_no_match_when_not_a_prefix() -> None:
 def test_classify_concept_unknown_returns_no_branch() -> None:
     tax = {"Run": None, "DQM": None}
     assert classify_concept("Random concept name", tax) == (None, False, False)
+
+
+# ── ":" inline-synonym syntax ──────────────────────────────────────────────
+
+
+def test_load_concept_taxonomy_inline_syntax_excludes_synonyms_from_taxonomy(tmp_path: Path) -> None:
+    """Synonyms after `:` are NOT canonical concepts — they must not appear in the taxonomy keys."""
+    _write(
+        tmp_path,
+        """
+- HGCAL : High Granularity Calorimeter, HGC
+- Run
+- Calibration Entry : CE
+""",
+    )
+    tax = load_concept_taxonomy(tmp_path)
+    # Only the canonical names appear as keys.
+    assert tax == {"HGCAL": None, "Run": None, "Calibration Entry": None}
+    # Synonyms should NOT be misread as canonicals.
+    for syn in ("High Granularity Calorimeter", "HGC", "CE"):
+        assert syn not in tax
+
+
+def test_load_concept_synonyms_returns_canonical_to_aliases_map(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        """
+- HGCAL : High Granularity Calorimeter, HGC
+- Run
+- Calibration Entry : CE
+""",
+    )
+    syns = load_concept_synonyms(tmp_path)
+    assert syns == {
+        "HGCAL": ["High Granularity Calorimeter", "HGC"],
+        "Calibration Entry": ["CE"],
+    }
+    assert "Run" not in syns  # no synonyms for Run
+
+
+def test_load_concept_synonyms_handles_nested_with_synonyms(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        """
+- DQM : Data Quality Monitoring
+  - DQM digest
+""",
+    )
+    tax = load_concept_taxonomy(tmp_path)
+    syns = load_concept_synonyms(tmp_path)
+    assert tax == {"DQM": None, "DQM digest": "DQM"}
+    assert syns == {"DQM": ["Data Quality Monitoring"]}
+
+
+def test_load_concept_synonyms_empty_when_no_colons(tmp_path: Path) -> None:
+    _write(tmp_path, "- Run\n- DQM\n")
+    assert load_concept_synonyms(tmp_path) == {}
+
+
+def test_load_concept_synonyms_empty_for_missing_file(tmp_path: Path) -> None:
+    assert load_concept_synonyms(tmp_path) == {}
+
+
+def test_is_synonym_resolves_to_canonical(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        """
+- HGCAL : High Granularity Calorimeter, HGC
+- DQM : Data Quality Monitoring
+- Run
+""",
+    )
+    assert is_synonym("High Granularity Calorimeter", tmp_path) == "HGCAL"
+    assert is_synonym("HGC", tmp_path) == "HGCAL"
+    assert is_synonym("Data Quality Monitoring", tmp_path) == "DQM"
+    # Canonicals are NOT their own synonym.
+    assert is_synonym("HGCAL", tmp_path) is None
+    assert is_synonym("Run", tmp_path) is None
+    # Not declared at all → not a synonym.
+    assert is_synonym("Random concept", tmp_path) is None
+
+
+def test_strip_inline_comment_does_not_eat_colons(tmp_path: Path) -> None:
+    """Make sure `:` in synonyms isn't mistaken for a comment delimiter."""
+    _write(tmp_path, "- HGCAL : High Granularity Calorimeter # the canonical type\n")
+    tax = load_concept_taxonomy(tmp_path)
+    syns = load_concept_synonyms(tmp_path)
+    assert tax == {"HGCAL": None}
+    assert syns == {"HGCAL": ["High Granularity Calorimeter"]}
