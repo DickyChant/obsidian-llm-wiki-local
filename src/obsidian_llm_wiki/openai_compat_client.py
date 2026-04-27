@@ -132,22 +132,39 @@ class OpenAICompatClient:
             "http://127.0.0.1"
         )
 
+    # Transient upstream failures worth retrying at the client layer. 5xx are
+    # all proxy/upstream problems (timeout, bad gateway, service unavailable,
+    # gateway timeout) — idempotent POSTs are safe to resend. 429 is the rate
+    # limit backoff path.
+    _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
     def _post_chat(self, payload: dict) -> httpx.Response:
-        """POST to chat endpoint with 429 exponential backoff (max ~60s cumulative)."""
+        """POST to chat endpoint with backoff on 429 + transient 5xx.
+
+        Budget is ~90s cumulative across retries (was 60s for 429-only). The
+        extra headroom matters for AccGPT's upstream 504s, which frequently
+        recover within 30s once the upstream model server finishes whatever
+        was wedging it.
+        """
         delay = 1.0
         waited = 0.0
+        attempt = 0
         while True:
+            attempt += 1
             resp = self._client.post(self._chat_url(), json=payload)
-            if resp.status_code != 429:
+            if resp.status_code not in self._RETRYABLE_STATUSES:
                 return resp
             retry_after = resp.headers.get("Retry-After")
             try:
                 wait = float(retry_after) if retry_after else delay
             except ValueError:
                 wait = delay
-            if waited + wait > 60.0:
+            if waited + wait > 90.0:
                 return resp
-            log.debug("%s: HTTP 429, backing off %.1fs", self.provider_name, wait)
+            log.debug(
+                "%s: HTTP %d (attempt %d), backing off %.1fs",
+                self.provider_name, resp.status_code, attempt, wait,
+            )
             time.sleep(wait)
             waited += wait
             delay = min(delay * 2, 16.0)
